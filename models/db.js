@@ -92,11 +92,11 @@ const dbOperations = {
     },
 
     // Reference operations
-    addReference: (userId, imageData) => {
+    addReference: (userId, imageBase64) => {
         return new Promise((resolve, reject) => {
             db.run(
                 'INSERT INTO face_references (userId, imageData) VALUES (?, ?)',
-                [userId, imageData],
+                [userId, imageBase64],
                 function(err) {
                     if (err) reject(err);
                     resolve(this.lastID);

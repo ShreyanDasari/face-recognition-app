@@ -12,17 +12,20 @@ app.use(express.json());
 
 // Set up storage for uploaded images
 const storage = multer.diskStorage({
-  destination: "uploads/",
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+  destination: function(req, file, cb) {
+    // Ensure uploads directory exists
+    if (!fs.existsSync("uploads")) {
+      fs.mkdirSync("uploads");
+    }
+    cb(null, "uploads/");
   },
+  filename: function(req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
 });
-const upload = multer({ storage });
 
-// Ensure uploads directory exists
-if (!fs.existsSync("uploads")) {
-  fs.mkdirSync("uploads");
-}
+// Initialize multer with storage configuration
+const upload = multer({ storage: storage });
 
 // People endpoints
 app.post("/people", async (req, res) => {
@@ -80,8 +83,12 @@ app.post("/people/:id/references", upload.single("image"), async (req, res) => {
   }
   
   try {
-    const imageData = fs.readFileSync(req.file.path);
-    const referenceId = await db.addReference(req.params.id, imageData);
+    // Read the file as a buffer
+    const imageBuffer = fs.readFileSync(req.file.path);
+    // Convert buffer to base64 string for storage
+    const imageBase64 = imageBuffer.toString('base64');
+    
+    const referenceId = await db.addReference(req.params.id, imageBase64);
     fs.unlinkSync(req.file.path); // Clean up the uploaded file
     res.status(201).json({ id: referenceId });
   } catch (error) {
@@ -110,97 +117,45 @@ app.delete("/references/:id", async (req, res) => {
   }
 });
 
-// Train model using database
-app.post("/train", async (req, res) => {
-  try {
-    // Get all references from database
-    const people = await db.getAllPeople();
-    const trainingData = [];
-    
-    for (const person of people) {
-      const references = await db.getReferences(person.id);
-      if (references.length > 0) {
-        // Create temporary files for training
-        const personDir = path.join("training", person.name);
-        if (!fs.existsSync(personDir)) {
-          fs.mkdirSync(personDir, { recursive: true });
-        }
-        
-        // Save each reference image to a temporary file
-        for (let i = 0; i < references.length; i++) {
-          const tempPath = path.join(personDir, `${i}.jpg`);
-          fs.writeFileSync(tempPath, references[i].imageData);
-          trainingData.push({ path: tempPath, personId: person.id });
-        }
-      }
+// Train model endpoint
+app.post("/train", (req, res) => {
+  exec("python3 detector.py --train", (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({ error: stderr });
     }
-    
-    // Run training
-    exec("python3 detector.py --train", async (error, stdout, stderr) => {
-      // Clean up temporary files
-      fs.rmSync("training", { recursive: true, force: true });
-      
-      if (error) {
-        return res.status(500).json({ error: stderr });
-      }
+    try {
+      const result = JSON.parse(stdout);
+      res.json(result);
+    } catch (parseError) {
       res.json({ message: "Training completed", output: stdout });
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Validate model using database
-app.post("/validate", async (req, res) => {
-  try {
-    // Get validation data from database
-    const people = await db.getAllPeople();
-    const validationData = [];
-    
-    for (const person of people) {
-      const references = await db.getReferences(person.id);
-      if (references.length > 0) {
-        // Create temporary files for validation
-        const personDir = path.join("validation", person.name);
-        if (!fs.existsSync(personDir)) {
-          fs.mkdirSync(personDir, { recursive: true });
-        }
-        
-        // Save each reference image to a temporary file
-        for (let i = 0; i < references.length; i++) {
-          const tempPath = path.join(personDir, `${i}.jpg`);
-          fs.writeFileSync(tempPath, references[i].imageData);
-          validationData.push({ path: tempPath, personId: person.id });
-        }
-      }
     }
-    
-    // Run validation
-    exec("python3 detector.py --validate", async (error, stdout, stderr) => {
-      // Clean up temporary files
-      fs.rmSync("validation", { recursive: true, force: true });
-      
-      if (error) {
-        return res.status(500).json({ error: stderr });
-      }
-      res.json({ message: "Validation completed", output: stdout });
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  });
 });
 
-// Recognize face using database
+// Validate model endpoint
+app.post("/validate", (req, res) => {
+  exec("python3 detector.py --validate", (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({ error: stderr });
+    }
+    try {
+      const result = JSON.parse(stdout);
+      res.json(result);
+    } catch (parseError) {
+      res.json({ message: "Validation completed", output: stdout });
+    }
+  });
+});
+
+// Recognize face endpoint
 app.post("/recognize", upload.single("image"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No file uploaded" });
   }
-  
+
   try {
     const imagePath = path.resolve(req.file.path);
-    
-    exec(`python detector.py --test -f ${imagePath}`, async (error, stdout, stderr) => {
-      // Clean up the uploaded file
+    exec(`python3 detector.py --test -f ${imagePath}`, (error, stdout, stderr) => {
       fs.unlinkSync(imagePath);
       
       if (error) {
@@ -209,11 +164,9 @@ app.post("/recognize", upload.single("image"), async (req, res) => {
       
       try {
         const result = JSON.parse(stdout);
-        
         if (!result.found) {
           return res.status(404).json(result);
         }
-        
         res.json(result);
       } catch (parseError) {
         res.status(500).json({ error: "Failed to parse recognition result" });
