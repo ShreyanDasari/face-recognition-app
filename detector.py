@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 import face_recognition
 from PIL import Image, ImageDraw
+import cv2
 
 DEFAULT_ENCODINGS_PATH = Path("output/encodings.pkl")
 DB_PATH = "face_recognition.db"
@@ -107,90 +108,119 @@ def recognize_faces(
     encodings_location: Path = DEFAULT_ENCODINGS_PATH,
 ) -> None:
     """
-    Given an unknown image, get the locations and encodings of any faces and
-    compares them against the known encodings to find potential matches.
-    Returns JSON with recognition results.
+    Process video frames for face recognition.
     """
     try:
+        # Check for trained model
+        if not encodings_location.exists():
+            print(json.dumps({
+                "found": False,
+                "message": "No trained model found"
+            }))
+            return
+
+        # Load encodings
         with encodings_location.open(mode="rb") as f:
             loaded_encodings = pickle.load(f)
 
+        if not loaded_encodings["encodings"]:
+            print(json.dumps({
+                "found": False,
+                "message": "No face encodings in model"
+            }))
+            return
+
+        # Process image
         input_image = face_recognition.load_image_file(image_location)
-        input_face_locations = face_recognition.face_locations(input_image, model=model)
-        input_face_encodings = face_recognition.face_encodings(input_image, input_face_locations)
+        
+        # Optimize for speed with smaller image
+        small_frame = cv2.resize(input_image, (0, 0), fx=0.25, fy=0.25)
+        rgb_small_frame = small_frame[:, :, ::-1]
+
+        # Detect faces
+        input_face_locations = face_recognition.face_locations(rgb_small_frame, model=model)
+        
+        if not input_face_locations:
+            print(json.dumps({
+                "found": False,
+                "message": "No faces detected"
+            }))
+            return
+
+        # Get encodings
+        input_face_encodings = face_recognition.face_encodings(rgb_small_frame, input_face_locations)
 
         if not input_face_encodings:
             print(json.dumps({
                 "found": False,
-                "message": "No faces detected in the image"
+                "message": "Could not encode faces"
             }))
             return
 
-        # Get the first face detected (assuming one face per image)
-        unknown_encoding = input_face_encodings[0]
-        name, person_id = _recognize_face(unknown_encoding, loaded_encodings)
+        # Process each detected face
+        results = []
+        for face_encoding in input_face_encodings:
+            # Compare with known faces
+            matches = face_recognition.compare_faces(
+                loaded_encodings["encodings"], 
+                face_encoding,
+                tolerance=0.6  # Adjust tolerance for better matching
+            )
+            
+            if not any(matches):
+                continue
 
-        if not name or not person_id:
+            # Calculate face distances
+            face_distances = face_recognition.face_distance(loaded_encodings["encodings"], face_encoding)
+            best_match_index = np.argmin(face_distances)
+            confidence = (1 - face_distances[best_match_index]) * 100
+
+            if matches[best_match_index] and confidence > 50:  # Minimum confidence threshold
+                person_id = loaded_encodings["person_ids"][best_match_index]
+                
+                # Get person details
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, name, age, address, info, email, phone, gender, nationality
+                    FROM people WHERE id = ?
+                """, (person_id,))
+
+                person = cursor.fetchone()
+                conn.close()
+
+                if person:
+                    results.append({
+                        "id": person[0],
+                        "name": person[1],
+                        "confidence": round(confidence, 2),
+                        "details": {
+                            "age": person[2],
+                            "address": person[3],
+                            "info": person[4],
+                            "email": person[5],
+                            "phone": person[6],
+                            "gender": person[7],
+                            "nationality": person[8]
+                        }
+                    })
+
+        if results:
+            print(json.dumps({
+                "found": True,
+                "matches": results
+            }))
+        else:
             print(json.dumps({
                 "found": False,
                 "message": "No matching person found"
             }))
-            return
 
-        # Get person details from database
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, name, age, address, info, email, phone, gender, nationality
-            FROM people WHERE id = ?
-        """, (person_id,))
-
-        person = cursor.fetchone()
-        conn.close()
-
-        if not person:
-            print(json.dumps({
-                "found": False,
-                "message": "Person data not found in database"
-            }))
-            return
-
-        # Convert tuple to dictionary
-        person_data = {
-            "id": person[0],
-            "name": person[1],
-            "age": person[2],
-            "address": person[3],
-            "info": person[4],
-            "email": person[5],
-            "phone": person[6],
-            "gender": person[7],
-            "nationality": person[8]
-        }
-
-        print(json.dumps({
-            "found": True,
-            "person": person_data,
-            "confidence": 100  # You could calculate actual confidence if needed
-        }))
     except Exception as e:
         print(json.dumps({
-            "error": str(e)
+            "error": str(e),
+            "found": False
         }))
-
-def _recognize_face(unknown_encoding, loaded_encodings):
-    """Finds the closest match for a given face encoding."""
-    boolean_matches = face_recognition.compare_faces(loaded_encodings["encodings"], unknown_encoding)
-
-    votes = Counter()
-    for match, name, person_id in zip(boolean_matches, loaded_encodings["names"], loaded_encodings["person_ids"]):
-        if match:
-            votes[(name, person_id)] += 1
-
-    if votes:
-        (name, person_id), _ = votes.most_common(1)[0]
-        return name, person_id
-    return None, None
 
 def validate(model: str = "hog"):
     """Validates the accuracy of the trained model."""

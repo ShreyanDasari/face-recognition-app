@@ -42,9 +42,9 @@ async def send_video():
                 break
 
             # Wait for 1 minute before sending the next frame
-            await asyncio.sleep(60)
+            await asyncio.sleep(5)
 
     cap.release()
-    cv2.destroyAllWindows()
+    cv2.destroyAllWindows(30)
 
 asyncio.run(send_video())
