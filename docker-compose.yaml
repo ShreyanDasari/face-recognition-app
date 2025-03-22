@@ -1,13 +1,15 @@
 version: '3.8'
+name: face_recognition
 
 services:
   app:
     build: .
-    container_name: python-node-app
+    container_name: face_recognition
     ports:
       - "3000:3000"
     volumes:
       - .:/app
+      - /app/node_modules 
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
