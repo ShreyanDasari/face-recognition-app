@@ -27,7 +27,15 @@ args = parser.parse_args()
 
 def get_db_connection():
     """Connect to SQLite database."""
-    return sqlite3.connect(DB_PATH)
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        return conn
+    except sqlite3.Error as e:
+        print(json.dumps({"error": f"Database connection error: {e}"}))
+        if conn:
+            conn.close()
+        return None
 
 def encode_known_faces(
     model: str = "hog", encodings_location: Path = DEFAULT_ENCODINGS_PATH
@@ -41,51 +49,62 @@ def encode_known_faces(
     person_ids = []
 
     conn = get_db_connection()
+    if not conn:
+        return
+
     cursor = conn.cursor()
     
-    # Get all references from database
-    cursor.execute("""
-        SELECT r.id, r.userId, r.imageData, p.name 
-        FROM face_references r 
-        JOIN people p ON r.userId = p.id
-    """)
-    
-    for row in cursor.fetchall():
-        ref_id, user_id, image_data, name = row
-        try:
-            # Decode base64 string to bytes
-            image_bytes = base64.b64decode(image_data)
-            # Convert bytes to image
-            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-            # Convert PIL Image to numpy array
-            image_array = np.array(image)
-            
-            face_locations = face_recognition.face_locations(image_array, model=model)
-            face_encodings = face_recognition.face_encodings(image_array, face_locations)
+    try:
+        # Get all references from database
+        cursor.execute("""
+            SELECT r.id, r.userId, r.imageData, p.name 
+            FROM face_references r 
+            JOIN people p ON r.userId = p.id
+        """)
+        
+        for row in cursor.fetchall():
+            ref_id, user_id, image_data, name = row
+            try:
+                # Decode base64 string to bytes
+                image_bytes = base64.b64decode(image_data)
+                # Convert bytes to image
+                image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+                # Convert PIL Image to numpy array
+                image_array = np.array(image)
+                
+                face_locations = face_recognition.face_locations(image_array, model=model)
+                face_encodings = face_recognition.face_encodings(image_array, face_locations)
 
-            for encoding in face_encodings:
-                names.append(name)
-                encodings.append(encoding)
-                person_ids.append(user_id)
-        except Exception as e:
-            print(f"Error processing image for reference {ref_id}: {str(e)}")
-            continue
+                for encoding in face_encodings:
+                    names.append(name)
+                    encodings.append(encoding)
+                    person_ids.append(user_id)
+            except Exception as e:
+                print(f"Error processing image for reference {ref_id}: {str(e)}")
+                continue
 
-    name_encodings = {
-        "names": names,
-        "encodings": encodings,
-        "person_ids": person_ids
-    }
-    with encodings_location.open(mode="wb") as f:
-        pickle.dump(name_encodings, f)
+        name_encodings = {
+            "names": names,
+            "encodings": encodings,
+            "person_ids": person_ids
+        }
+        with encodings_location.open(mode="wb") as f:
+            pickle.dump(name_encodings, f)
 
-    conn.close()
+        print(json.dumps({"status": "Training complete", "total_faces": len(names)}))
+
+    except sqlite3.Error as e:
+        print(json.dumps({"error": f"Database error during training: {e}"}))
+    except pickle.PickleError as e:
+        print(json.dumps({"error": f"Error saving encodings: {e}"}))
+    except Exception as e:
+        print(json.dumps({"error": f"An unexpected error occurred during training: {e}"}))
+    finally:
+        conn.close()
 
     if not names:
         print(json.dumps({"error": "No faces found in training data."}))
         return
-
-    print(json.dumps({"status": "Training complete", "total_faces": len(names)}))
 
 def load_encodings(encodings_location: Path = DEFAULT_ENCODINGS_PATH):
     """Loads face encodings from the saved file."""
@@ -93,14 +112,24 @@ def load_encodings(encodings_location: Path = DEFAULT_ENCODINGS_PATH):
         print(json.dumps({"error": "No trained encodings found. Run training first."}))
         return None
 
-    with encodings_location.open(mode="rb") as f:
-        encodings = pickle.load(f)
+    try:
+        with encodings_location.open(mode="rb") as f:
+            encodings = pickle.load(f)
 
-    if "person_ids" not in encodings:
-        print(json.dumps({"error": "Corrupt encodings file. Retrain the model."}))
+        if "person_ids" not in encodings:
+            print(json.dumps({"error": "Corrupt encodings file. Retrain the model."}))
+            return None
+
+        return encodings
+    except pickle.PickleError as e:
+        print(json.dumps({"error": f"Error loading encodings: {e}"}))
         return None
-
-    return encodings
+    except FileNotFoundError:
+        print(json.dumps({"error": "Encoding file not found."}))
+        return None
+    except Exception as e:
+        print(json.dumps({"error": f"An unexpected error occurred while loading encodings: {e}"}))
+        return None
 
 def recognize_faces(
     image_location: str,
@@ -120,8 +149,9 @@ def recognize_faces(
             return
 
         # Load encodings
-        with encodings_location.open(mode="rb") as f:
-            loaded_encodings = pickle.load(f)
+        loaded_encodings = load_encodings(encodings_location)
+        if not loaded_encodings:
+            return
 
         if not loaded_encodings["encodings"]:
             print(json.dumps({
@@ -131,7 +161,20 @@ def recognize_faces(
             return
 
         # Process image
-        input_image = face_recognition.load_image_file(image_location)
+        try:
+            input_image = face_recognition.load_image_file(image_location)
+        except FileNotFoundError:
+            print(json.dumps({
+                "found": False,
+                "message": "Image file not found"
+            }))
+            return
+        except Exception as e:
+             print(json.dumps({
+                "found": False,
+                "message": f"Error loading image: {e}"
+            }))
+             return
         
         # Optimize for speed with smaller image
         small_frame = cv2.resize(input_image, (0, 0), fx=0.25, fy=0.25)
@@ -180,30 +223,42 @@ def recognize_faces(
                 
                 # Get person details
                 conn = get_db_connection()
+                if not conn:
+                    print(json.dumps({
+                        "found": False,
+                        "message": "Could not connect to database to retrieve person details."
+                    }))
+                    continue
                 cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT id, name, age, address, info, email, phone, gender, nationality
-                    FROM people WHERE id = ?
-                """, (person_id,))
+                try:
+                    cursor.execute("""
+                        SELECT id, name, age, address, info, email, phone, gender, nationality
+                        FROM people WHERE id = ?
+                    """, (person_id,))
 
-                person = cursor.fetchone()
-                conn.close()
-
-                if person:
-                    results.append({
-                        "id": person[0],
-                        "name": person[1],
-                        "confidence": round(confidence, 2),
-                        "details": {
-                            "age": person[2],
-                            "address": person[3],
-                            "info": person[4],
-                            "email": person[5],
-                            "phone": person[6],
-                            "gender": person[7],
-                            "nationality": person[8]
-                        }
-                    })
+                    person = cursor.fetchone()
+                    if person:
+                        results.append({
+                            "id": person[0],
+                            "name": person[1],
+                            "confidence": round(confidence, 2),
+                            "details": {
+                                "age": person[2],
+                                "address": person[3],
+                                "info": person[4],
+                                "email": person[5],
+                                "phone": person[6],
+                                "gender": person[7],
+                                "nationality": person[8]
+                            }
+                        })
+                except sqlite3.Error as e:
+                    print(json.dumps({
+                        "found": False,
+                        "message": f"Database error retrieving person details: {e}"
+                    }))
+                finally:
+                    conn.close()
 
         if results:
             print(json.dumps({
@@ -222,6 +277,19 @@ def recognize_faces(
             "found": False
         }))
 
+def _recognize_face(face_encoding, loaded_encodings):
+    """Helper function to recognize a single face."""
+    matches = face_recognition.compare_faces(
+        loaded_encodings["encodings"],
+        face_encoding,
+        tolerance=0.6
+    )
+    if True in matches:
+        matched_index = matches.index(True)
+        name = loaded_encodings["names"][matched_index]
+        return name, matched_index
+    return "Unknown", None
+
 def validate(model: str = "hog"):
     """Validates the accuracy of the trained model."""
     loaded_encodings = load_encodings()
@@ -229,41 +297,52 @@ def validate(model: str = "hog"):
         return
 
     conn = get_db_connection()
+    if not conn:
+        return
+
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT r.id, r.userId, r.imageData, p.name 
-        FROM face_references r 
-        JOIN people p ON r.userId = p.id
-    """)
+    try:
+        cursor.execute("""
+            SELECT r.id, r.userId, r.imageData, p.name 
+            FROM face_references r 
+            JOIN people p ON r.userId = p.id
+        """)
 
-    total, correct = 0, 0
+        total, correct = 0, 0
 
-    for row in cursor.fetchall():
-        ref_id, user_id, image_data, true_name = row
+        for row in cursor.fetchall():
+            ref_id, user_id, image_data, true_name = row
 
-        if isinstance(image_data, str):
-            image_data = image_data.encode()
+            try:
+                if isinstance(image_data, str):
+                    image_data = image_data.encode()
 
-        input_image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        input_image_array = np.array(input_image)
+                image = Image.open(io.BytesIO(base64.b64decode(image_data))).convert("RGB")
+                image_array = np.array(image)
 
-        input_face_locations = face_recognition.face_locations(input_image_array, model=model)
-        input_face_encodings = face_recognition.face_encodings(input_image_array, input_face_locations)
+                face_locations = face_recognition.face_locations(image_array, model=model)
+                face_encodings = face_recognition.face_encodings(image_array, face_locations)
 
-        if input_face_encodings:
-            name, _ = _recognize_face(input_face_encodings[0], loaded_encodings)
-            total += 1
-            if name == true_name:
-                correct += 1
+                if face_encodings:
+                    name, _ = _recognize_face(face_encodings[0], loaded_encodings)
+                    total += 1
+                    if name == true_name:
+                        correct += 1
+            except Exception as e:
+                print(f"Error processing validation image {ref_id}: {e}")
+                continue
 
-    conn.close()
+        if total > 0:
+            accuracy = (correct / total) * 100
+            print(json.dumps({"accuracy": round(accuracy, 2), "total_tested": total, "correct_matches": correct}))
+        else:
+            print(json.dumps({"error": "No faces found in validation set"}))
 
-    if total > 0:
-        accuracy = (correct / total) * 100
-        print(json.dumps({"accuracy": round(accuracy, 2), "total_tested": total, "correct_matches": correct}))
-    else:
-        print(json.dumps({"error": "No faces found in validation set"}))
+    except sqlite3.Error as e:
+        print(json.dumps({"error": f"Database error during validation: {e}"}))
+    finally:
+        conn.close()
 
 if __name__ == "__main__":
     if args.train:
