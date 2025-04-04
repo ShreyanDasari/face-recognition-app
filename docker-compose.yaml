@@ -2,6 +2,17 @@ version: '3.8'
 name: face_recognition
 
 services:
+  rabbitmq:
+    image: "rabbitmq:3-management"
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    restart: unless-stopped
+
   app:
     build: .
     container_name: face_recognition
@@ -9,7 +20,10 @@ services:
       - "3000:3000"
     volumes:
       - .:/app
-      - /app/node_modules 
+      - /app/node_modules
     environment:
       - PYTHONUNBUFFERED=1
+      - RABBITMQ_URL=amqp://user:password@rabbitmq
+    depends_on:
+      - rabbitmq
     restart: unless-stopped
