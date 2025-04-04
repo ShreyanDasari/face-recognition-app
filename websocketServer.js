@@ -20,7 +20,7 @@ if (!fs.existsSync(resultsFile)) {
   XLSX.writeFile(wb, resultsFile);
 }
 
-const RABBITMQ_URL = "amqp://rabbitmq";
+const RABBITMQ_URL = "amqp://user:password@rabbitmq";
 const QUEUE_NAME = "image_processing_queue";
 
 async function connectRabbitMQ() {
@@ -91,6 +91,8 @@ async function startWorker() {
             result.confidence || 0,
             result.found ? "Match Found" : "No Match"
           );
+          console.log("✅ Image processed:", data.frameId);
+          console.log("Result:", result);
 
           if (!result.found && fs.existsSync(tempImagePath)) {
             fs.unlinkSync(tempImagePath);

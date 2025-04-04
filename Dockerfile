@@ -11,11 +11,12 @@ WORKDIR /app
 RUN python3 -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir numpy dlib face-recognition 
+
+# RUN pip install --no-cache-dir numpy dlib face-recognition 
 
 # Copy project files
 COPY . .
-
+RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /app/uploads
 RUN rm -rf node_modules package-lock.json
 RUN npm cache clean --force
