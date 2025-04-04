@@ -10,16 +10,24 @@ router.post("/", upload.single("image"), (req, res) => {
 
   const imagePath = path.resolve(req.file.path);
 
-  exec(`python3 detector.py --test -f ${imagePath}`, (error, stdout, stderr) => {
+  // Fix: Wrap the imagePath in quotes to handle spaces and special characters
+  exec(`python3 detector.py --test -m hog -f "${imagePath}"`, (error, stdout, stderr) => {
+    // Clean up the uploaded file
     fs.unlinkSync(imagePath);
+    
     if (error) return res.status(500).json({ error: stderr });
 
     try {
       const result = JSON.parse(stdout);
       if (!result.found) return res.status(404).json(result);
       res.json(result);
-    } catch {
-      res.status(500).json({ error: "Failed to parse recognition result" });
+    } catch (e) {
+      // Added error parameter to catch for better debugging
+      res.status(500).json({ 
+        error: "Failed to parse recognition result",
+        details: e.message,
+        stdout: stdout
+      });
     }
   });
 });
