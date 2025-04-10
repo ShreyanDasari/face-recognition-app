@@ -4,14 +4,12 @@ const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
 
-// Ensure directories exist
+// Constants
 const uploadsDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
-}
-
-// Ensure results file exists
 const resultsFile = path.join(__dirname, "results.xlsx");
+
+// Ensure directories and result file exist
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 if (!fs.existsSync(resultsFile)) {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
@@ -26,226 +24,123 @@ module.exports = function setupWebSocket(server) {
 
   wss.on("connection", (ws) => {
     console.log("✅ Client connected");
-    let processingFrame = false;
-    let lastProcessedTime = 0;
-    const minProcessingInterval = 500; // Minimum 500ms between frames
 
-    ws.on("message", async (message) => {
-      const currentTime = Date.now();
-      
-      // Check if enough time has passed since last processing
-      if (currentTime - lastProcessedTime < minProcessingInterval) {
-        return;
-      }
+    let lastProcessed = 0;
+    let isProcessing = false;
+    const interval = 500;
 
-      // Skip if still processing previous frame
-      if (processingFrame) {
-        return;
-      }
+    ws.on("message", async (msg) => {
+      const now = Date.now();
+      if (isProcessing || (now - lastProcessed < interval)) return;
 
       try {
-        processingFrame = true;
-        lastProcessedTime = currentTime;
-        const data = JSON.parse(message);
+        isProcessing = true;
+        lastProcessed = now;
+        const data = JSON.parse(msg);
 
-        // Validate required fields
         if (!data.observerId || !data.frameId || !data.timestamp || !data.image) {
-          console.error("❌ Invalid data format");
-          ws.send(JSON.stringify({ 
-            error: "Invalid data format",
-            frameId: data.frameId,
-            timestamp: data.timestamp 
-          }));
-          processingFrame = false;
-          return;
+          return ws.send(JSON.stringify({ error: "Invalid data format" }));
         }
 
-        console.log("📥 Received data:", {
-          observerId: data.observerId,
-          frameId: data.frameId,
-          timestamp: new Date(data.timestamp).toISOString()
+        const tempImagePath = path.join(uploadsDir, `frame_${data.frameId}.jpg`);
+        fs.writeFileSync(tempImagePath, Buffer.from(data.image, 'base64'));
+
+        runCustomDetector(tempImagePath, (err, result) => {
+          fs.existsSync(tempImagePath) && fs.unlinkSync(tempImagePath);
+
+          if (err) {
+            updateExcel(data, null, 0, "Error: " + err);
+            return ws.send(JSON.stringify({
+              frameId: data.frameId,
+              timestamp: data.timestamp,
+              error: "Detection failed",
+              details: err
+            }));
+          }
+
+          if (result.found && result.person) {
+            updateExcel(data, result.person, result.confidence, "Match Found");
+            ws.send(JSON.stringify({
+              frameId: data.frameId,
+              timestamp: data.timestamp,
+              found: true,
+              person: result.person,
+              confidence: result.confidence
+            }));
+          } else {
+            updateExcel(data, null, 0, "No Match");
+            ws.send(JSON.stringify({
+              frameId: data.frameId,
+              timestamp: data.timestamp,
+              found: false,
+              message: "No matching person found"
+            }));
+          }
+
+          isProcessing = false;
         });
 
-        // Save base64 image to temp file
-        const tempImagePath = path.join(uploadsDir, `temp_${data.frameId}.jpg`);
-        try {
-          const imageBuffer = Buffer.from(data.image, 'base64');
-          fs.writeFileSync(tempImagePath, imageBuffer);
-
-          processImageWithPython(tempImagePath, (error, result) => {
-            try {
-              // Clean up temp file
-              if (fs.existsSync(tempImagePath)) {
-                fs.unlinkSync(tempImagePath);
-              }
-
-              if (error) {
-                console.error("❌ Recognition error:", error);
-                ws.send(JSON.stringify({
-                  error: "Recognition failed",
-                  details: error,
-                  frameId: data.frameId,
-                  timestamp: data.timestamp
-                }));
-                updateExcel(
-                  data.observerId,
-                  data.frameId,
-                  data.timestamp,
-                  null,
-                  null,
-                  0,
-                  "Error: " + error
-                );
-                return;
-              }
-
-              // Process recognition result
-              if (result.found && result.person) {
-                console.log("✅ Recognized:", {
-                  name: result.person.name,
-                  confidence: result.confidence
-                });
-
-                updateExcel(
-                  data.observerId,
-                  data.frameId,
-                  data.timestamp,
-                  result.person.id,
-                  result.person.name,
-                  result.confidence,
-                  "Match Found"
-                );
-
-                // Send detailed response
-                ws.send(JSON.stringify({
-                  frameId: data.frameId,
-                  timestamp: data.timestamp,
-                  found: true,
-                  person: result.person,
-                  confidence: result.confidence
-                }));
-              } else {
-                console.log("🚫 No matching person found");
-                updateExcel(
-                  data.observerId,
-                  data.frameId,
-                  data.timestamp,
-                  null,
-                  null,
-                  0,
-                  "No Match"
-                );
-
-                ws.send(JSON.stringify({
-                  frameId: data.frameId,
-                  timestamp: data.timestamp,
-                  found: false,
-                  message: "No matching person found"
-                }));
-              }
-            } finally {
-              processingFrame = false;
-            }
-          });
-        } catch (error) {
-          console.error("❌ Image processing error:", error);
-          if (fs.existsSync(tempImagePath)) {
-            fs.unlinkSync(tempImagePath);
-          }
-          processingFrame = false;
-          ws.send(JSON.stringify({
-            error: "Image processing failed",
-            details: error.message,
-            frameId: data.frameId,
-            timestamp: data.timestamp
-          }));
-        }
-      } catch (error) {
-        console.error("❌ Error parsing message:", error);
-        processingFrame = false;
-        ws.send(JSON.stringify({ 
-          error: "Invalid message format",
-          details: error.message 
-        }));
+      } catch (err) {
+        isProcessing = false;
+        ws.send(JSON.stringify({ error: "Invalid message format", details: err.message }));
       }
     });
 
-    ws.on("close", () => {
-      console.log("🔴 Client disconnected");
-    });
+    ws.on("close", () => console.log("🔴 Client disconnected"));
   });
 
   return wss;
 };
 
-function processImageWithPython(imagePath, callback) {
-  try {
-    const pythonProcess = spawn("python3", ["detector.py", "--test", "-f", imagePath]);
-    let stdoutData = "";
-    let stderrData = "";
+// 🔁 Replace or customize detection logic here
+function runCustomDetector(imagePath, callback) {
+  const python = spawn("python3", ["custom_detector.py", "--file", imagePath]);
+  let stdout = "", stderr = "";
+  const timeoutMs = 10000;
 
-    // Increase timeout to 10 seconds
-    const timeoutDuration = 10000; // 10 seconds
-    let timeoutId;
+  const timeout = setTimeout(() => {
+    python.kill();
+    callback("Timeout exceeded", null);
+  }, timeoutMs);
 
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        pythonProcess.kill();
-        reject(new Error("Recognition timeout"));
-      }, timeoutDuration);
-    });
+  python.stdout.on("data", (data) => stdout += data);
+  python.stderr.on("data", (data) => stderr += data);
 
-    pythonProcess.stdout.on("data", (data) => {
-      stdoutData += data.toString();
-    });
+  python.on("close", (code) => {
+    clearTimeout(timeout);
+    if (code !== 0) return callback(stderr, null);
 
-    pythonProcess.stderr.on("data", (data) => {
-      stderrData += data.toString();
-    });
-
-    pythonProcess.on("close", (code) => {
-      clearTimeout(timeoutId);
-      
-      if (code !== 0) {
-        callback(`Python process error (${code}): ${stderrData}`, null);
-        return;
-      }
-
-      try {
-        const result = JSON.parse(stdoutData);
-        callback(null, result);
-      } catch (err) {
-        callback(`Failed to parse result: ${err.message}`, null);
-      }
-    });
-
-  } catch (error) {
-    callback(`Failed to start recognition: ${error.message}`, null);
-  }
+    try {
+      const result = JSON.parse(stdout);
+      callback(null, result);
+    } catch (e) {
+      callback("Invalid JSON: " + e.message, null);
+    }
+  });
 }
 
-function updateExcel(observerId, frameId, timestamp, personId, name, confidence, status) {
+// Excel logging
+function updateExcel(data, person, confidence, status) {
   try {
     const workbook = XLSX.readFile(resultsFile);
     const worksheet = workbook.Sheets["Results"];
-    const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-    
-    // Add new row with all details
-    data.push([
-      observerId,
-      frameId,
-      new Date(timestamp).toISOString(),
-      personId || "N/A",
-      name || "N/A",
+    const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+    rows.push([
+      data.observerId,
+      data.frameId,
+      new Date(data.timestamp).toISOString(),
+      person?.id || "N/A",
+      person?.name || "N/A",
       confidence || 0,
       status
     ]);
 
-    const newWorksheet = XLSX.utils.aoa_to_sheet(data);
-    workbook.Sheets["Results"] = newWorksheet;
+    const updatedSheet = XLSX.utils.aoa_to_sheet(rows);
+    workbook.Sheets["Results"] = updatedSheet;
     XLSX.writeFile(workbook, resultsFile);
-    console.log("📄 Result saved to Excel");
-  } catch (error) {
-    console.error("❌ Error updating Excel:", error);
+    console.log("📄 Excel updated");
+  } catch (err) {
+    console.error("❌ Excel update failed:", err);
   }
 }

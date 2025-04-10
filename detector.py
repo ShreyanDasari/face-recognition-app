@@ -8,7 +8,7 @@ import numpy as np
 from collections import Counter
 from pathlib import Path
 import face_recognition
-from PIL import Image, ImageDraw
+from PIL import Image
 
 DEFAULT_ENCODINGS_PATH = Path("output/encodings.pkl")
 DB_PATH = "face_recognition.db"
@@ -24,59 +24,77 @@ parser.add_argument("-m", action="store", default="hog", choices=["hog", "cnn"],
 parser.add_argument("-f", action="store", help="Path to an image for testing")
 args = parser.parse_args()
 
+
 def get_db_connection():
-    """Connect to SQLite database."""
     return sqlite3.connect(DB_PATH)
 
-def encode_known_faces(
-    model: str = "hog", encodings_location: Path = DEFAULT_ENCODINGS_PATH
-) -> None:
-    """
-    Loads images from the database and builds a dictionary of their
-    names and encodings.
-    """
+
+def encode_known_faces(model="hog", encodings_location=DEFAULT_ENCODINGS_PATH):
     names = []
     encodings = []
     person_ids = []
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # Get all references from database
+
     cursor.execute("""
         SELECT r.id, r.userId, r.imageData, p.name 
         FROM face_references r 
         JOIN people p ON r.userId = p.id
     """)
-    
+
     for row in cursor.fetchall():
         ref_id, user_id, image_data, name = row
         try:
-            # Decode base64 string to bytes
+            # Decode base64 image data
             image_bytes = base64.b64decode(image_data)
-            # Convert bytes to image
-            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-            # Convert PIL Image to numpy array
-            image_array = np.array(image)
             
+            # Create a temporary file to save the image
+            temp_file = io.BytesIO(image_bytes)
+            
+            # Load and convert image to RGB using PIL first
+            pil_image = Image.open(temp_file)
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Resize large images
+            if pil_image.size[0] > 1024 or pil_image.size[1] > 1024:
+                pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            
+            # Save the processed image to a new BytesIO
+            processed_temp = io.BytesIO()
+            pil_image.save(processed_temp, format='JPEG')
+            processed_temp.seek(0)
+            
+            # Use face_recognition's load_image_file
+            image_array = face_recognition.load_image_file(processed_temp)
+            
+            # Debug information
+            print(f"Processing reference {ref_id}:")
+            print(f"Original image mode: {pil_image.mode}")
+            print(f"Original image size: {pil_image.size}")
+            print(f"Array shape: {image_array.shape}")
+            print(f"Array dtype: {image_array.dtype}")
+
+            # Detect faces
             face_locations = face_recognition.face_locations(image_array, model=model)
+            
+            if not face_locations:
+                print(f"No faces found in image for reference {ref_id}")
+                continue
+                
             face_encodings = face_recognition.face_encodings(image_array, face_locations)
 
             for encoding in face_encodings:
                 names.append(name)
                 encodings.append(encoding)
                 person_ids.append(user_id)
+                print(f"✅ Successfully processed face for {name} (ID: {user_id})")
+
         except Exception as e:
             print(f"Error processing image for reference {ref_id}: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
             continue
-
-    name_encodings = {
-        "names": names,
-        "encodings": encodings,
-        "person_ids": person_ids
-    }
-    with encodings_location.open(mode="wb") as f:
-        pickle.dump(name_encodings, f)
 
     conn.close()
 
@@ -84,10 +102,23 @@ def encode_known_faces(
         print(json.dumps({"error": "No faces found in training data."}))
         return
 
-    print(json.dumps({"status": "Training complete", "total_faces": len(names)}))
+    name_encodings = {
+        "names": names,
+        "encodings": encodings,
+        "person_ids": person_ids
+    }
 
-def load_encodings(encodings_location: Path = DEFAULT_ENCODINGS_PATH):
-    """Loads face encodings from the saved file."""
+    with encodings_location.open(mode="wb") as f:
+        pickle.dump(name_encodings, f)
+
+    print(json.dumps({
+        "status": "Training complete",
+        "total_faces": len(names),
+        "unique_people": len(set(names))
+    }))
+
+
+def load_encodings(encodings_location=DEFAULT_ENCODINGS_PATH):
     if not encodings_location.exists():
         print(json.dumps({"error": "No trained encodings found. Run training first."}))
         return None
@@ -101,32 +132,63 @@ def load_encodings(encodings_location: Path = DEFAULT_ENCODINGS_PATH):
 
     return encodings
 
-def recognize_faces(
-    image_location: str,
-    model: str = "hog",
-    encodings_location: Path = DEFAULT_ENCODINGS_PATH,
-) -> None:
-    """
-    Given an unknown image, get the locations and encodings of any faces and
-    compares them against the known encodings to find potential matches.
-    Returns JSON with recognition results.
-    """
+
+def recognize_faces(image_location, model="hog", encodings_location=DEFAULT_ENCODINGS_PATH):
     try:
         with encodings_location.open(mode="rb") as f:
             loaded_encodings = pickle.load(f)
 
-        input_image = face_recognition.load_image_file(image_location)
-        input_face_locations = face_recognition.face_locations(input_image, model=model)
-        input_face_encodings = face_recognition.face_encodings(input_image, input_face_locations)
+        # Load and process image
+        try:
+            # Load and convert image to RGB using PIL first
+            pil_image = Image.open(image_location)
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Resize large images
+            if pil_image.size[0] > 1024 or pil_image.size[1] > 1024:
+                pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            
+            # Save to temporary file
+            temp_file = io.BytesIO()
+            pil_image.save(temp_file, format='JPEG')
+            temp_file.seek(0)
+            
+            # Use face_recognition's load_image_file
+            image_array = face_recognition.load_image_file(temp_file)
+            
+            # Debug information
+            print(json.dumps({
+                "debug": {
+                    "original_mode": pil_image.mode,
+                    "original_size": pil_image.size,
+                    "array_shape": image_array.shape,
+                    "array_dtype": str(image_array.dtype)
+                }
+            }))
 
-        if not input_face_encodings:
+        except Exception as e:
+            raise ValueError(f"Failed to load or process image: {str(e)}")
+
+        # Detect and encode faces
+        input_face_locations = face_recognition.face_locations(image_array, model=model)
+        
+        if not input_face_locations:
             print(json.dumps({
                 "found": False,
                 "message": "No faces detected in the image"
             }))
             return
 
-        # Get the first face detected (assuming one face per image)
+        input_face_encodings = face_recognition.face_encodings(image_array, input_face_locations)
+        
+        if not input_face_encodings:
+            print(json.dumps({
+                "found": False,
+                "message": "Could not encode detected face"
+            }))
+            return
+
         unknown_encoding = input_face_encodings[0]
         name, person_id = _recognize_face(unknown_encoding, loaded_encodings)
 
@@ -137,14 +199,12 @@ def recognize_faces(
             }))
             return
 
-        # Get person details from database
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, name, age, address, info, email, phone, gender, nationality
             FROM people WHERE id = ?
         """, (person_id,))
-
         person = cursor.fetchone()
         conn.close()
 
@@ -155,7 +215,6 @@ def recognize_faces(
             }))
             return
 
-        # Convert tuple to dictionary
         person_data = {
             "id": person[0],
             "name": person[1],
@@ -171,18 +230,16 @@ def recognize_faces(
         print(json.dumps({
             "found": True,
             "person": person_data,
-            "confidence": 100  # You could calculate actual confidence if needed
+            "confidence": 100  # Placeholder confidence
         }))
     except Exception as e:
-        print(json.dumps({
-            "error": str(e)
-        }))
+        print(json.dumps({"error": str(e)}))
+
 
 def _recognize_face(unknown_encoding, loaded_encodings):
-    """Finds the closest match for a given face encoding."""
     boolean_matches = face_recognition.compare_faces(loaded_encodings["encodings"], unknown_encoding)
-
     votes = Counter()
+
     for match, name, person_id in zip(boolean_matches, loaded_encodings["names"], loaded_encodings["person_ids"]):
         if match:
             votes[(name, person_id)] += 1
@@ -192,15 +249,14 @@ def _recognize_face(unknown_encoding, loaded_encodings):
         return name, person_id
     return None, None
 
-def validate(model: str = "hog"):
-    """Validates the accuracy of the trained model."""
+
+def validate(model="hog"):
     loaded_encodings = load_encodings()
     if not loaded_encodings:
         return
 
     conn = get_db_connection()
     cursor = conn.cursor()
-
     cursor.execute("""
         SELECT r.id, r.userId, r.imageData, p.name 
         FROM face_references r 
@@ -211,21 +267,21 @@ def validate(model: str = "hog"):
 
     for row in cursor.fetchall():
         ref_id, user_id, image_data, true_name = row
+        try:
+            image_bytes = base64.b64decode(image_data)
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            image_array = np.array(image).astype(np.uint8)
 
-        if isinstance(image_data, str):
-            image_data = image_data.encode()
+            input_face_locations = face_recognition.face_locations(image_array, model=model)
+            input_face_encodings = face_recognition.face_encodings(image_array, input_face_locations)
 
-        input_image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        input_image_array = np.array(input_image)
-
-        input_face_locations = face_recognition.face_locations(input_image_array, model=model)
-        input_face_encodings = face_recognition.face_encodings(input_image_array, input_face_locations)
-
-        if input_face_encodings:
-            name, _ = _recognize_face(input_face_encodings[0], loaded_encodings)
-            total += 1
-            if name == true_name:
-                correct += 1
+            if input_face_encodings:
+                name, _ = _recognize_face(input_face_encodings[0], loaded_encodings)
+                total += 1
+                if name == true_name:
+                    correct += 1
+        except Exception as e:
+            print(f"Error during validation on reference {ref_id}: {e}")
 
     conn.close()
 
@@ -234,6 +290,7 @@ def validate(model: str = "hog"):
         print(json.dumps({"accuracy": round(accuracy, 2), "total_tested": total, "correct_matches": correct}))
     else:
         print(json.dumps({"error": "No faces found in validation set"}))
+
 
 if __name__ == "__main__":
     if args.train:
