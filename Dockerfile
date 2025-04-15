@@ -10,12 +10,15 @@ WORKDIR /app
 # Install Python dependencies inside a virtual environment
 RUN python3 -m venv /venv
 ENV PATH="/venv/bin:$PATH"
-RUN pip install --no-cache-dir numpy dlib face-recognition
+RUN pip install --upgrade pip
+# RUN pip install --no-cache-dir numpy dlib face-recognition 
 
 # Copy project files
 COPY . .
-RUN mkdir -p /app/uploads
 
+RUN mkdir -p /app/uploads
+RUN rm -rf node_modules package-lock.json
+RUN npm cache clean --force
 # Install Node.js dependencies
 RUN npm install
 
@@ -23,4 +26,4 @@ RUN npm install
 EXPOSE 3000
 
 # Start the application
-CMD ["npm", "start"]
+CMD ["npm", "run", "dev"]
