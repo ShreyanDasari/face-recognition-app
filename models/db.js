@@ -28,6 +28,15 @@ db.serialize(() => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (userId) REFERENCES people(id) ON DELETE CASCADE
     )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observer_id TEXT NOT NULL,
+        detected_person_id INTEGER NOT NULL,
+        photo BLOB NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (detected_person_id) REFERENCES people(id) ON DELETE CASCADE
+    )`);
 });
 
 // Helper functions for database operations
@@ -40,7 +49,7 @@ const dbOperations = {
                 `INSERT INTO people (name, age, address, info, email, phone, gender, nationality)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [name, age, address, info, email, phone, gender, nationality],
-                function(err) {
+                function (err) {
                     if (err) reject(err);
                     resolve(this.lastID);
                 }
@@ -69,7 +78,7 @@ const dbOperations = {
     updatePerson: (id, personData) => {
         const updates = Object.keys(personData).map(key => `${key} = ?`).join(', ');
         const values = [...Object.values(personData), id];
-        
+
         return new Promise((resolve, reject) => {
             db.run(
                 `UPDATE people SET ${updates} WHERE id = ?`,
@@ -97,7 +106,7 @@ const dbOperations = {
             db.run(
                 'INSERT INTO face_references (userId, imageData) VALUES (?, ?)',
                 [userId, imageBase64],
-                function(err) {
+                function (err) {
                     if (err) reject(err);
                     resolve(this.lastID);
                 }
@@ -121,7 +130,49 @@ const dbOperations = {
                 resolve(true);
             });
         });
-    }
+    },
+
+    addNotification: ({ observer_id, detected_person_id, photo }) => {
+        return new Promise((resolve, reject) => {
+          const sql = `INSERT INTO notifications (observer_id, detected_person_id, photo, timestamp) VALUES (?, ?, ?, datetime('now'))`;
+          db.run(sql, [observer_id, detected_person_id, photo], function (err) {
+            if (err) return reject(err);
+            resolve(this.lastID);
+          });
+        });
+      },
+
+    getNotificationsByPersonId: (personId) => {
+        return new Promise((resolve, reject) => {
+            db.all(
+                `SELECT * FROM notifications WHERE detected_person_id = ?`,
+                [personId],
+                (err, rows) => {
+                    if (err) reject(err);
+                    resolve(rows);
+                }
+            );
+        });
+    },
+
+    getAllNotifications: () => {
+        return new Promise((resolve, reject) => {
+            db.all('SELECT * FROM notifications', (err, rows) => {
+                if (err) reject(err);
+                resolve(rows);
+            });
+        });
+    },
+
+    deleteNotification: (id) => {
+        return new Promise((resolve, reject) => {
+            db.run('DELETE FROM notifications WHERE id = ?', [id], (err) => {
+                if (err) reject(err);
+                resolve(true);
+            });
+        });
+    },
+
 };
 
 module.exports = dbOperations; 

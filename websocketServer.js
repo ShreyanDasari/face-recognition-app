@@ -3,7 +3,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
-
+const db = require("./models/db");
 // Ensure directories exist
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {
@@ -147,6 +147,17 @@ module.exports = function setupWebSocket(server) {
               processingFrame = false;
             }
           });
+          try {
+            const imageBuffer = fs.readFileSync(imagePath); // Read the same temp image
+            const notificationId = await db.addNotification({
+              observer_id: data.observerId,
+              detected_person_id: result.person.id,
+              photo: imageBuffer
+            });
+            console.log("🛎️ Notification saved:", notificationId);
+          } catch (notifyErr) {
+            console.error("❌ Failed to save notification:", notifyErr);
+          }
         } catch (error) {
           console.error("❌ Image processing error:", error);
           if (fs.existsSync(tempImagePath)) {

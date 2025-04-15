@@ -32,7 +32,7 @@ router.get("/:id/references", async (req, res) => {
 });
 
 // Delete a reference
-router.delete("/references/:id", async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     await db.deleteReference(req.params.id);
     res.json({ message: "Reference deleted successfully" });
