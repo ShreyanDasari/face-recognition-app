@@ -37,7 +37,18 @@ db.serialize(() => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (detected_person_id) REFERENCES people(id) ON DELETE CASCADE
     )`);
+    db.run(`CREATE TABLE IF NOT EXISTS observers (
+        id TEXT PRIMARY KEY,
+        area TEXT,
+        city TEXT,
+        location TEXT,
+        map_link TEXT,
+        latitude REAL,
+        longitude REAL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 });
+
 
 // Helper functions for database operations
 const dbOperations = {
@@ -172,6 +183,64 @@ const dbOperations = {
             });
         });
     },
+    addObserver: (observerData) => {
+        return new Promise((resolve, reject) => {
+            const { id, area, city, location, map_link, latitude, longitude } = observerData;
+            db.run(
+                `INSERT INTO observers (id, area, city, location, map_link, latitude, longitude)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [id, area, city, location, map_link, latitude, longitude],
+                function (err) {
+                    if (err) reject(err);
+                    resolve(id);
+                }
+            );
+        });
+    },
+
+    getObserver: (id) => {
+        return new Promise((resolve, reject) => {
+            db.get('SELECT * FROM observers WHERE id = ?', [id], (err, row) => {
+                if (err) reject(err);
+                resolve(row);
+            });
+        });
+    },
+
+    getAllObservers: () => {
+        return new Promise((resolve, reject) => {
+            db.all('SELECT * FROM observers', (err, rows) => {
+                if (err) reject(err);
+                resolve(rows);
+            });
+        });
+    },
+
+    updateObserver: (id, observerData) => {
+        const updates = Object.keys(observerData).map(key => `${key} = ?`).join(', ');
+        const values = [...Object.values(observerData), id];
+
+        return new Promise((resolve, reject) => {
+            db.run(
+                `UPDATE observers SET ${updates} WHERE id = ?`,
+                values,
+                (err) => {
+                    if (err) reject(err);
+                    resolve(true);
+                }
+            );
+        });
+    },
+
+    deleteObserver: (id) => {
+        return new Promise((resolve, reject) => {
+            db.run('DELETE FROM observers WHERE id = ?', [id], (err) => {
+                if (err) reject(err);
+                resolve(true);
+            });
+        });
+    },
+    
 
 };
 

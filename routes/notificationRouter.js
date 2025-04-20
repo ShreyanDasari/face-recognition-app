@@ -5,6 +5,14 @@ const fs = require("fs");
 const path = require("path");
 const db = require("../models/db");
 
+const cors = require("cors");
+
+router.use(cors({
+    origin: "http://localhost:5173",
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
 // Add a new notification
 router.post("/", upload.single("photo"), async (req, res) => {
     const { observer_id, detected_person_id } = req.body;

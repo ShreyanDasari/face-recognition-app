@@ -21,13 +21,14 @@ const referenceRoutes = require("./routes/referenceRoutes");
 const modelRoutes = require("./routes/modelRoutes");
 const recognitionRoutes = require("./routes/recognitionRoutes");
 const notificationRoutes = require("./routes/notificationRouter");
-
+const observerRoutes = require("./routes/observerRoutes");
 // Use routes
 app.use("/people", authenticateToken, peopleRoutes);
 app.use("/reference", authenticateToken, referenceRoutes);
 app.use("/model", authenticateToken, modelRoutes);
 app.use("/recognize", authenticateToken, recognitionRoutes);
 app.use("/notifications", authenticateToken, notificationRoutes);
+app.use("/observers", authenticateToken, observerRoutes);
 
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
