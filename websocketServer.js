@@ -68,11 +68,12 @@ module.exports = function setupWebSocket(server) {
 
         // Save base64 image to temp file
         const tempImagePath = path.join(uploadsDir, `temp_${data.frameId}.jpg`);
+
         try {
           const imageBuffer = Buffer.from(data.image, 'base64');
           fs.writeFileSync(tempImagePath, imageBuffer);
 
-          processImageWithPython(tempImagePath, (error, result) => {
+          processImageWithPython(tempImagePath, async (error, result) => {
             try {
               // Clean up temp file
               if (fs.existsSync(tempImagePath)) {
@@ -105,6 +106,12 @@ module.exports = function setupWebSocket(server) {
                   name: result.person.name,
                   confidence: result.confidence
                 });
+                const notificationId = await db.addNotification({
+                  observer_id: data.observerId,
+                  detected_person_id: result.person.id,
+                  photo: imageBuffer
+                });
+                console.log("🛎️ Notification saved:", notificationId);
 
                 updateExcel(
                   data.observerId,
@@ -147,17 +154,6 @@ module.exports = function setupWebSocket(server) {
               processingFrame = false;
             }
           });
-          try {
-            const imageBuffer = fs.readFileSync(imagePath); // Read the same temp image
-            const notificationId = await db.addNotification({
-              observer_id: data.observerId,
-              detected_person_id: result.person.id,
-              photo: imageBuffer
-            });
-            console.log("🛎️ Notification saved:", notificationId);
-          } catch (notifyErr) {
-            console.error("❌ Failed to save notification:", notifyErr);
-          }
         } catch (error) {
           console.error("❌ Image processing error:", error);
           if (fs.existsSync(tempImagePath)) {
